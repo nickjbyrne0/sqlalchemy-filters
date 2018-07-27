@@ -1,5 +1,6 @@
 from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.inspection import inspect
+from sqlalchemy_utils import get_type, get_query_entities
 
 from .exceptions import BadQuery, FieldNotFound, BadSpec
 
@@ -11,13 +12,24 @@ class Field(object):
         self.field_name = field_name
 
     def get_sqlalchemy_field(self):
-        if self.field_name not in inspect(self.model).columns.keys():
-            raise FieldNotFound(
-                'Model {} has no column `{}`.'.format(
-                    self.model, self.field_name
-                )
+
+        inspected = inspect(self.model)
+
+        if '.' in self.field_name:
+            model_field, related_field, = self.field_name.split('.')
+
+            if model_field in inspected.relationships.keys():
+                related_model = get_type(getattr(self.model, model_field))
+                return getattr(related_model, related_field)
+
+        elif self.field_name in inspected.columns.keys():
+            return getattr(self.model, self.field_name)
+
+        raise FieldNotFound(
+            'Model {} has no column `{}`.'.format(
+                self.model, self.field_name
             )
-        return getattr(self.model, self.field_name)
+        )
 
 
 def get_query_models(query):
@@ -104,7 +116,31 @@ def get_default_model(query):
         default_model = None
     return default_model
 
+def implicit_join(query, model, filters):
 
+    def filter_join(query, spec):
+        if '.' in spec.filter_spec['field']:
+            # achieves a join using - query(Parent).join(Parent.relation)
+            field_name, relation_field_name = spec.filter_spec['field'].split('.')
+            class_and_field = getattr(model, field_name)
+
+            try:
+                query = query.join( class_and_field )
+            except InvalidRequestError as e:
+                pass  # can't be autojoined
+
+        return query
+
+    for f1 in filters:
+        if hasattr(f1, 'filters'):
+            for f2 in f1.filters:
+                if hasattr(f1, 'filters'):
+                    query = filter_join(query, f2)
+        else:
+            query = filter_join(query, f1)
+
+    return query
+            
 def auto_join(query, *model_names):
     """ Automatically join models to `query` if they're not already present
     and the join can be done implicitly.
